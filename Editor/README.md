@@ -37,6 +37,15 @@ git clone git@github.com:brsk420/UnityEditorTools.git Assets/Editor/UnityEditorT
 
 ### Textures
 - **Downscale Tool** — даунскейл текстур (−5% … −75%)
+- **Downscale Preview** (`_Brsk420.Runtime.DownscalePreview`) — компонент на GameObject со `SpriteRenderer`.
+  Крутилка `Quality (%)` показывает в эдиторе, как будет выглядеть спрайт ПОСЛЕ Downscale Tool
+  (шакалит только визуал, ассет не трогает). 100% = оригинал. Работает и для **анимации
+  (sprite sequence)** — следит за `SpriteRenderer` каждый кадр (edit- и play-mode) и шакалит
+  каждый новый кадр на лету, кадры кешируются по исходному спрайту. Сам компонент лежит в
+  `Assets/_Brsk420/Runtime/` (вне `Editor/`, иначе его нельзя накинуть на объект), вся логика
+  под `#if UNITY_EDITOR` — в билд не попадает.
+
+
 - **Make Texture Divided By Four** — паддинг текстур до кратности 4
 - **Remove Black Background** — удаление чёрного фона (exact / threshold)
 - **Texture Tools**
