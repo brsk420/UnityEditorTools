@@ -9,7 +9,7 @@ namespace _Brsk420.EditorTools
 {
     internal static class MakeTextureDividedByFour
     {
-        [MenuItem("Assets/_BrskTools/Textures/MakeTextureDividedByFour")]
+        [MenuItem("Assets/_BrskTools/Textures/MakeTextureDividedByFour", false, -1000)]
         private static void Run()
         {
             ProcessSelectedTextures();

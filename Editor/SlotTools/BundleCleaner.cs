@@ -6,7 +6,7 @@ using System.Linq;
 
 public class SlotBundleCleaner
 {
-    [MenuItem("Assets/_BrskTools/Clean Bundle", priority = 20)]
+    [MenuItem("Assets/_BrskTools/Clean Bundle", priority = -1980)]
     public static void CleanBundle()
     {
         var selectedFolder = GetSelectedFolder();
@@ -95,14 +95,14 @@ public class SlotBundleCleaner
 
         if (EditorUtility.DisplayDialog("Clean Bundle", message, "Preview", "Cancel"))
         {
-            ShowPreview(bundleName, toDelete, toKeep);
+            ShowPreview(bundleName, bundleRoot, toDelete, toKeep);
         }
     }
 
-    private static void ShowPreview(string bundleName, List<string> toDelete, List<string> toKeep)
+    private static void ShowPreview(string bundleName, string bundleRoot, List<string> toDelete, List<string> toKeep)
     {
         var window = EditorWindow.GetWindow<BundleCleanerWindow>("Clean " + bundleName);
-        window.Init(bundleName, toDelete, toKeep);
+        window.Init(bundleName, bundleRoot, toDelete, toKeep);
         window.minSize = new Vector2(700, 500);
     }
 
@@ -158,7 +158,7 @@ public class SlotBundleCleaner
             $"Deleted: {deleted} assets\nFailed: {failed}\n\nEmpty folders cleaned.", "OK");
     }
 
-    private static void RemoveEmptyFolders(string folderPath)
+    public static void RemoveEmptyFolders(string folderPath)
     {
         if (!AssetDatabase.IsValidFolder(folderPath)) return;
 
@@ -178,15 +178,17 @@ public class SlotBundleCleaner
 public class BundleCleanerWindow : EditorWindow
 {
     private string _bundleName;
+    private string _bundleRoot;
     private List<string> _toDelete;
     private List<string> _toKeep;
     private Vector2 _scrollDelete;
     private Vector2 _scrollKeep;
     private int _tab = 0;
 
-    public void Init(string bundleName, List<string> toDelete, List<string> toKeep)
+    public void Init(string bundleName, string bundleRoot, List<string> toDelete, List<string> toKeep)
     {
         _bundleName = bundleName;
+        _bundleRoot = bundleRoot;
         _toDelete = toDelete;
         _toKeep = toKeep;
     }
@@ -277,9 +279,15 @@ public class BundleCleanerWindow : EditorWindow
             AssetDatabase.Refresh();
         }
 
+        if (!string.IsNullOrEmpty(_bundleRoot))
+        {
+            SlotBundleCleaner.RemoveEmptyFolders(_bundleRoot);
+            AssetDatabase.Refresh();
+        }
+
         Debug.Log($"[Bundle Cleaner] Deleted: {deleted}, Failed: {failed}");
         EditorUtility.DisplayDialog("Done",
-            $"Deleted: {deleted} assets\nFailed: {failed}", "OK");
+            $"Deleted: {deleted} assets\nFailed: {failed}\n\nEmpty folders cleaned.", "OK");
 
         Close();
     }

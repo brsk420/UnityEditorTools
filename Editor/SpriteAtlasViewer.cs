@@ -48,6 +48,11 @@ public class SpriteAtlasViewer : EditorWindow
     private static readonly Dictionary<string, PageData[]> s_PageDataCache =
         new Dictionary<string, PageData[]>();
 
+    // Atlases where the repack fallback (Approach C) already failed this session —
+    // skip retrying it automatically (it's slow and some Unity versions show a
+    // blocking native "Error!" dialog for oversized 9-slice meshes on every repack).
+    private static readonly HashSet<string> s_RepackFailed = new HashSet<string>();
+
     // ================================================================= lifecycle
 
     [OnOpenAsset]
@@ -68,7 +73,7 @@ public class SpriteAtlasViewer : EditorWindow
 
     // ================================================================= loading
 
-    private void LoadAtlas(SpriteAtlas atlas)
+    private void LoadAtlas(SpriteAtlas atlas, bool forceRepack = false)
     {
         _atlas          = atlas;
         _pages          = null;
@@ -80,17 +85,36 @@ public class SpriteAtlasViewer : EditorWindow
 
         if (_atlas == null) return;
 
-        string atlasPath = AssetDatabase.GetAssetPath(_atlas);
+        try
+        {
+            LoadAtlasInternal(_atlas, forceRepack);
+        }
+        catch (System.Exception ex)
+        {
+            // Never let an exception escape LoadAtlas — it can be called mid-OnGUI
+            // (toolbar buttons), and an uncaught throw there corrupts IMGUI's
+            // GUILayout Begin/End stack for the rest of the window's life.
+            Debug.LogWarning($"[Atlas Viewer] Failed to load '{_atlas?.name}': {ex.Message}");
+            _needsPack = true;
+            titleContent = new GUIContent($"Atlas: {_atlas?.name}  (load failed)");
+        }
+    }
+
+    private void LoadAtlasInternal(SpriteAtlas atlas, bool forceRepack = false)
+    {
+        string atlasPath = AssetDatabase.GetAssetPath(atlas);
         string atlasGuid = AssetDatabase.AssetPathToGUID(atlasPath);
         var originals    = BuildOriginalMap();
 
+        if (forceRepack) s_RepackFailed.Remove(atlasGuid);
+
         // --- step 1: load display pages (always fresh) ------------------
-        Texture2D[] pages = LoadAtlasPages(_atlas, atlasPath);
+        Texture2D[] pages = LoadAtlasPages(atlas, atlasPath);
 
         if (pages == null || pages.Length == 0)
         {
             _needsPack = true;
-            titleContent = new GUIContent($"Atlas: {_atlas.name}");
+            titleContent = new GUIContent($"Atlas: {atlas.name}");
             return;
         }
 
@@ -102,7 +126,7 @@ public class SpriteAtlasViewer : EditorWindow
         {
             _pageData = cached;
             titleContent = new GUIContent(
-                $"Atlas: {_atlas.name}  ({_atlas.spriteCount} sprites / {_pages.Length} page{(_pages.Length > 1 ? "s" : "")})");
+                $"Atlas: {atlas.name}  ({atlas.spriteCount} sprites / {_pages.Length} page{(_pages.Length > 1 ? "s" : "")})");
             return;
         }
 
@@ -112,21 +136,10 @@ public class SpriteAtlasViewer : EditorWindow
 
         Dictionary<int, int>    instToPage = BuildInstToPage(pages);
         Dictionary<string, int> nameToPage = BuildNameToPage(pages);
-        Sprite[] packed = GetPackedSpritesReflect(_atlas);
-
-        // --- DEBUG ---
-        var p0 = packed?.Length > 0 ? packed[0] : null;
-        var tx1 = p0 != null ? SpriteUtility.GetSpriteTexture(p0, true) : null;
-        Debug.Log($"[AV] pages={pages.Length}  page[0].name={pages[0]?.name}  " +
-                  $"packed={packed?.Length}  " +
-                  $"p0.tex={p0?.texture?.name}  " +
-                  $"GetTex(true)={tx1?.name}  " +
-                  $"sameRef={p0?.texture == tx1}  " +
-                  $"instMatch={tx1 != null && instToPage.ContainsKey(tx1.GetInstanceID())}  " +
-                  $"nameMatch={tx1 != null && nameToPage.ContainsKey(tx1.name)}");
-        // --- END DEBUG ---
+        Sprite[] packed = GetPackedSpritesReflect(atlas);
 
         int expectedSprites = packed?.Length ?? 0;
+        Debug.Log($"[AV] pages={pages.Length}  page[0].name={pages[0]?.name}  packed={expectedSprites}");
 
         // Approach A: sprite.texture directly matches a loaded page (Mac/DXT5 projects)
         if (packed != null)
@@ -139,31 +152,31 @@ public class SpriteAtlasViewer : EditorWindow
 
         int foundAfterAB = _pageData.Sum(pd => pd.Sprites.Count);
         // Need at least 90% of expected sprites — if not, must repack
-        bool anyPopulated = foundAfterAB >= expectedSprites * 0.9f;
+        bool anyPopulated = expectedSprites > 0 && foundAfterAB >= expectedSprites * 0.9f;
         Debug.Log($"[AV] after A+B: found={foundAfterAB}/{expectedSprites}  sufficient={anyPopulated}");
 
         // Approach C: iOS/ASTC format — temporarily pack as StandaloneOSX, extract data, restore iOS.
-        // Result is cached so this only runs once per session per atlas.
-        if (!anyPopulated)
+        // Result is cached so this only runs once per session per atlas. Skip it entirely if it
+        // already failed for this atlas this session — it's slow and some Unity versions pop a
+        // blocking native "Error!" dialog for oversized 9-slice meshes on every repack attempt.
+        if (!anyPopulated && s_RepackFailed.Contains(atlasGuid))
+        {
+            Debug.Log($"[AV] skipping repack — already known to fail for this atlas this session");
+        }
+        else if (!anyPopulated)
         {
             BuildTarget origTarget = GuessPackTarget(pages);
             Debug.Log($"[AV] C: origTarget={origTarget}  repacking as StandaloneOSX…");
 
             EditorUtility.DisplayProgressBar("Atlas Viewer", "Packing preview (mac)…", 0.3f);
-            try   { SpriteAtlasUtility.PackAtlases(new[] { _atlas }, BuildTarget.StandaloneOSX); AssetDatabase.Refresh(); }
+            try   { SpriteAtlasUtility.PackAtlases(new[] { atlas }, BuildTarget.StandaloneOSX); AssetDatabase.Refresh(); }
             finally { EditorUtility.ClearProgressBar(); }
 
-            var macPages   = LoadAtlasPages(_atlas, atlasPath);
+            var macPages   = LoadAtlasPages(atlas, atlasPath);
             var macInst    = BuildInstToPage(macPages);
             var macName    = BuildNameToPage(macPages);
-            packed         = GetPackedSpritesReflect(_atlas);
-
-            var mp0  = packed?.Length > 0 ? packed[0] : null;
-            var mtx1 = mp0 != null ? SpriteUtility.GetSpriteTexture(mp0, true) : null;
-            Debug.Log($"[AV] C after repack: macPages={macPages?.Length}  macPage[0]={macPages?[0]?.name}  " +
-                      $"p0.tex={mp0?.texture?.name}  GetTex(true)={mtx1?.name}  " +
-                      $"instMatch={mtx1 != null && macInst.ContainsKey(mtx1.GetInstanceID())}  " +
-                      $"nameMatch={mtx1 != null && macName.ContainsKey(mtx1.name)}");
+            packed         = GetPackedSpritesReflect(atlas);
+            Debug.Log($"[AV] C after repack: macPages={macPages?.Length}  macPage[0]={macPages?[0]?.name}  packed={packed?.Length}");
 
             anyPopulated   = PopulateFromPacked(packed, macInst, macName, originals, useSpriteTexRect: true);
             Debug.Log($"[AV] C after PopulateFromPacked: anyPopulated={anyPopulated}");
@@ -175,9 +188,9 @@ public class SpriteAtlasViewer : EditorWindow
             if (origTarget != BuildTarget.StandaloneOSX)
             {
                 EditorUtility.DisplayProgressBar("Atlas Viewer", "Restoring atlas format…", 0.7f);
-                try   { SpriteAtlasUtility.PackAtlases(new[] { _atlas }, origTarget); AssetDatabase.Refresh(); }
+                try   { SpriteAtlasUtility.PackAtlases(new[] { atlas }, origTarget); AssetDatabase.Refresh(); }
                 finally { EditorUtility.ClearProgressBar(); }
-                _pages = LoadAtlasPages(_atlas, atlasPath) ?? _pages;
+                _pages = LoadAtlasPages(atlas, atlasPath) ?? _pages;
                 var restoredInst = BuildInstToPage(_pages);
                 var restoredName = BuildNameToPage(_pages);
                 RemapPageData(_pageData, macPages, restoredInst, restoredName);
@@ -186,8 +199,9 @@ public class SpriteAtlasViewer : EditorWindow
 
         if (!anyPopulated)
         {
+            s_RepackFailed.Add(atlasGuid);
             _needsPack = true;
-            titleContent = new GUIContent($"Atlas: {_atlas.name}  (pack failed)");
+            titleContent = new GUIContent($"Atlas: {atlas.name}  (pack failed)");
             return;
         }
 
@@ -195,7 +209,7 @@ public class SpriteAtlasViewer : EditorWindow
         s_PageDataCache[atlasGuid] = _pageData;
 
         titleContent = new GUIContent(
-            $"Atlas: {_atlas.name}  ({_atlas.spriteCount} sprites / {_pages.Length} page{(_pages.Length > 1 ? "s" : "")})");
+            $"Atlas: {atlas.name}  ({atlas.spriteCount} sprites / {_pages.Length} page{(_pages.Length > 1 ? "s" : "")})");
     }
 
     // Clear cache for a specific atlas (e.g. after manual Refresh)
@@ -247,7 +261,9 @@ public class SpriteAtlasViewer : EditorWindow
     {
         var flags = BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public;
         var m     = typeof(SpriteAtlasExtensions).GetMethod("GetPackedSprites", flags);
-        return m?.Invoke(null, new object[] { atlas }) as Sprite[];
+        try { return m?.Invoke(null, new object[] { atlas }) as Sprite[]; }
+        catch (TargetInvocationException) { return null; } // atlas has no packed data yet
+        catch (System.ArgumentException) { return null; }
     }
 
     // Approach C: GetSpriteTexture(sprite,true) returns the real atlas page.
@@ -338,7 +354,7 @@ public class SpriteAtlasViewer : EditorWindow
         }
         finally { EditorUtility.ClearProgressBar(); }
         InvalidateCache();
-        LoadAtlas(_atlas);
+        LoadAtlas(_atlas, forceRepack: true);
     }
 
     // Guess original pack target from page texture format name

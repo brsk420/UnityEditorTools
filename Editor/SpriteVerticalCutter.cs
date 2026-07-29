@@ -10,7 +10,7 @@ namespace _Brsk420.EditorTools
     {
         private const string MenuPath = "Assets/_BrskTools/Sprites/Cut Vertically (Keep Left Half)";
 
-        [MenuItem(MenuPath)]
+        [MenuItem(MenuPath, false, -1000)]
         private static void CutSelected()
         {
             var texturePaths = CollectTexturePathsFromSelection();

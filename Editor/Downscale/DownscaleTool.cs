@@ -10,25 +10,25 @@ namespace _Brsk420.EditorTools
     internal static class DownscaleTool
     {
         // Quality (%) presets. Label shows the reduction, value is the kept quality.
-        [MenuItem("Assets/_BrskTools/Textures/Downscale/Downscale textures (-25%)")]
+        [MenuItem("Assets/_BrskTools/Textures/Downscale/Downscale textures (-25%)", false, -1000)]
         private static void DownscaleSelected_25()
         {
             DownscaleSelection(75);
         }
 
-        [MenuItem("Assets/_BrskTools/Textures/Downscale/Downscale textures (-50%)")]
+        [MenuItem("Assets/_BrskTools/Textures/Downscale/Downscale textures (-50%)", false, -999)]
         private static void DownscaleSelected_50()
         {
             DownscaleSelection(50);
         }
 
-        [MenuItem("Assets/_BrskTools/Textures/Downscale/Downscale textures (-75%)")]
+        [MenuItem("Assets/_BrskTools/Textures/Downscale/Downscale textures (-75%)", false, -998)]
         private static void DownscaleSelected_75()
         {
             DownscaleSelection(25);
         }
 
-        [MenuItem("Assets/_BrskTools/Textures/Downscale/Custom…")]
+        [MenuItem("Assets/_BrskTools/Textures/Downscale/Custom…", false, -997)]
         private static void OpenCustomWindow()
         {
             DownscaleWindow.Open();

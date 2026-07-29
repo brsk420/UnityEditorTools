@@ -9,13 +9,13 @@ namespace _Brsk420.EditorTools
 {
     internal static class RemoveBlackBackground
     {
-        [MenuItem("Assets/_BrskTools/Textures/Remove Black Background (exact)")]
+        [MenuItem("Assets/_BrskTools/Textures/Remove Black Background/Exact", false, -1000)]
         private static void RemoveExact() => Process(0);
 
-        [MenuItem("Assets/_BrskTools/Textures/Remove Black Background (threshold 10)")]
+        [MenuItem("Assets/_BrskTools/Textures/Remove Black Background/Threshold 10", false, -999)]
         private static void RemoveThreshold10() => Process(10);
 
-        [MenuItem("Assets/_BrskTools/Textures/Remove Black Background (threshold 25)")]
+        [MenuItem("Assets/_BrskTools/Textures/Remove Black Background/Threshold 25", false, -998)]
         private static void RemoveThreshold25() => Process(25);
 
         private static void Process(int threshold)

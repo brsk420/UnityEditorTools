@@ -5,7 +5,7 @@ using UnityEngine;
 
 public static class DeleteEvery2
 {
-    [MenuItem("Assets/_BrskTools/DeleteEvery2", false, 81)]
+    [MenuItem("Assets/_BrskTools/DeleteEvery2", false, -1919)]
     private static void DeleteEvery2Menu()
     {
         var selection = Selection.GetFiltered(typeof(Object), SelectionMode.Assets)

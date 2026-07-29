@@ -8,7 +8,7 @@ namespace _Brsk420.EditorTools
     public static class SortToFolder
     {
         // Вызов из контекстного меню Project (ПКМ по ассетам/папке)
-        [MenuItem("Assets/_BrskTools/Sort To Folders", priority = 1000)]
+        [MenuItem("Assets/_BrskTools/Sort To Folders", priority = -1000)]
         private static void Sort()
         {
             var selectedObjects = Selection.GetFiltered<Object>(SelectionMode.Assets);

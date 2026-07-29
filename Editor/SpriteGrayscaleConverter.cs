@@ -10,7 +10,7 @@ namespace _Brsk420.EditorTools
     {
         private const string MenuPath = "Assets/_BrskTools/Sprites/Make Grayscale";
 
-        [MenuItem(MenuPath)]
+        [MenuItem(MenuPath, false, -1000)]
         private static void MakeSelectedGrayscale()
         {
             var texturePaths = CollectTexturePathsFromSelection();
