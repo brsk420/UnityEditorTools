@@ -1,5 +1,6 @@
 using UnityEditor;
 using UnityEngine;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 
@@ -18,24 +19,47 @@ namespace _Brsk420.EditorTools
                 return;
             }
 
+            var rootFolders = new HashSet<string>();
+            foreach (var obj in selectedObjects)
+            {
+                var path = AssetDatabase.GetAssetPath(obj);
+                if (string.IsNullOrEmpty(path))
+                    continue;
+
+                var folderPath = AssetDatabase.IsValidFolder(path)
+                    ? path
+                    : Path.GetDirectoryName(path)?.Replace("\\", "/");
+
+                if (!string.IsNullOrEmpty(folderPath))
+                    rootFolders.Add(folderPath);
+            }
+
+            var moves = new List<(string from, string to)>();
+            foreach (var rootFolder in rootFolders)
+                CollectMoves(rootFolder, moves);
+
+            if (moves.Count == 0)
+                return;
+
+            // Folders must exist in the AssetDatabase BEFORE StartAssetEditing: a folder created
+            // inside it isn't registered yet, so IsValidFolder() stays false (CreateFolder then
+            // makes "Group 1", "Group 2"...) and MoveAsset fails with
+            // "Parent directory is not in asset database".
+            foreach (var folder in moves.Select(m => Path.GetDirectoryName(m.to).Replace("\\", "/")).Distinct())
+            {
+                if (!AssetDatabase.IsValidFolder(folder))
+                    AssetDatabase.CreateFolder(Path.GetDirectoryName(folder).Replace("\\", "/"), Path.GetFileName(folder));
+            }
+
             AssetDatabase.StartAssetEditing();
             try
             {
-                foreach (var obj in selectedObjects)
+                foreach (var (from, to) in moves)
                 {
-                    var path = AssetDatabase.GetAssetPath(obj);
-                    if (string.IsNullOrEmpty(path))
-                        continue;
-
-                    if (AssetDatabase.IsValidFolder(path))
+                    var error = AssetDatabase.MoveAsset(from, to);
+                    if (!string.IsNullOrEmpty(error))
                     {
-                        SortFolder(path);
-                    }
-                    else
-                    {
-                        var folderPath = Path.GetDirectoryName(path).Replace("\\", "/");
-                        if (!string.IsNullOrEmpty(folderPath))
-                            SortFolder(folderPath);
+                        Debug.LogWarning($"[SortToFolder] Failed to move '{from}' -> '{to}': {error}");
                     }
                 }
             }
@@ -53,7 +77,7 @@ namespace _Brsk420.EditorTools
             return selected != null && selected.Length > 0;
         }
 
-        private static void SortFolder(string rootFolder)
+        private static void CollectMoves(string rootFolder, List<(string from, string to)> moves)
         {
             if (string.IsNullOrEmpty(rootFolder))
                 return;
@@ -76,27 +100,11 @@ namespace _Brsk420.EditorTools
                 if (!string.Equals(parentDir, rootFolder, System.StringComparison.Ordinal))
                     continue;
 
-                var fileName = Path.GetFileName(assetPath);
-                var nameWithoutExt = Path.GetFileNameWithoutExtension(assetPath);
-                string group = GetGroupName(nameWithoutExt);
+                string group = GetGroupName(Path.GetFileNameWithoutExtension(assetPath));
                 if (string.IsNullOrEmpty(group))
                     continue;
 
-                string groupFolderPath = $"{rootFolder}/{group}";
-                if (!AssetDatabase.IsValidFolder(groupFolderPath))
-                {
-                    AssetDatabase.CreateFolder(rootFolder, group);
-                }
-
-                string newPath = $"{groupFolderPath}/{fileName}";
-                if (assetPath == newPath)
-                    continue;
-
-                var error = AssetDatabase.MoveAsset(assetPath, newPath);
-                if (!string.IsNullOrEmpty(error))
-                {
-                    Debug.LogWarning($"[SortToFolder] Failed to move '{assetPath}' -> '{newPath}': {error}");
-                }
+                moves.Add((assetPath, $"{rootFolder}/{group}/{Path.GetFileName(assetPath)}"));
             }
         }
 
