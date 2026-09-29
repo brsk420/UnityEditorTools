@@ -33,7 +33,7 @@ git clone git@github.com:brsk420/UnityEditorTools.git Assets/Editor/UnityEditorT
 - **Rename Animation Clips**
 - **Bake Sprite Animation** — запекание анимации в спрайты
 - **Transform Copier** — копирование Transform-значений
-- **Multi Animator Preview** (`Tools/Multi Animator Preview`)
+- **Multi Animation Player** (`Tools/Multi Animation Player`) — одновременное проигрывание клипов на нескольких Animator (edit и play mode)
 
 ### Textures
 - **Downscale Tool** — даунскейл текстур (−5% … −75%)
