@@ -1,3 +1,4 @@
+using _Brsk420.Runtime;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -71,7 +72,11 @@ namespace _Brsk420.EditorTools
 
             try
             {
-                texture.LoadImage(bytes);
+                if (!PngLoader.TryLoad(texture, bytes, path))
+                {
+                    return;
+                }
+
                 var targetHeight = texture.height;
                 var targetWidth = texture.width;
 

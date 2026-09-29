@@ -20,7 +20,8 @@ namespace _Brsk420.Runtime
     /// Drop it on a GameObject that has a SpriteRenderer, then drag the Quality slider.
     /// 100% = original. Lower values simulate the downscale (same bilinear Blit path the
     /// real tool uses), then upscale back to the original size to keep on-screen size
-    /// constant. Intended for single-texture sprites (not Sprite Atlas entries).
+    /// constant. For Sprite Atlas entries the whole atlas page is downscaled, which only
+    /// approximates the per-PNG tool.
     /// </summary>
     [ExecuteAlways]
     [RequireComponent(typeof(SpriteRenderer))]
@@ -83,19 +84,12 @@ namespace _Brsk420.Runtime
 
         private void OnValidate()
         {
-            // Quality changed -> previously cached frames are stale.
+            // Tick (EditorApplication.update) notices the quality change on its own; here we
+            // only make sure the edit-mode loop runs so it happens right away. Rebuilding from
+            // a delayCall used to destroy the texture that was still bound to the renderer.
             if (_cachedQuality != _quality)
             {
-                UnityEditor.EditorApplication.delayCall += () =>
-                {
-                    if (this == null)
-                    {
-                        return;
-                    }
-
-                    ClearCache();
-                    Tick();
-                };
+                UnityEditor.EditorApplication.QueuePlayerLoopUpdate();
             }
         }
 
@@ -119,40 +113,94 @@ namespace _Brsk420.Runtime
                 }
             }
 
+            // Quality changed -> cached frames are stale. They're destroyed only AFTER the
+            // renderer has been switched to the new texture: destroying the one that's still
+            // bound leaves the renderer sampling a dead texture until the prefab is reopened.
+            List<Texture2D> stale = null;
+
             if (_cachedQuality != _quality)
             {
-                ClearCache();
+                stale = new List<Texture2D>(_cache.Values);
+                _cache.Clear();
                 _cachedQuality = _quality;
             }
 
-            // At full quality (or when there's no sprite/texture), make sure no override
-            // is left on the renderer and bail.
-            var sprite = _renderer.sprite;
-            var sourceTexture = sprite != null ? sprite.texture : null;
-
-            if (_quality >= 100 || sourceTexture == null)
+            try
             {
-                ClearOverride();
-                return;
-            }
+                // At full quality (or when there's no sprite/texture), make sure no override
+                // is left on the renderer and bail.
+                var sprite = _renderer.sprite;
+                var sourceTexture = sprite != null ? GetRenderedTexture(sprite) : null;
 
-            var downscaled = GetOrBuildPreviewTexture(sourceTexture, _quality);
-            if (downscaled == null)
+                if (_quality >= 100 || sourceTexture == null)
+                {
+                    ClearOverride();
+                    return;
+                }
+
+                var downscaled = GetOrBuildPreviewTexture(sourceTexture, _quality);
+                if (downscaled == null)
+                {
+                    ClearOverride();
+                    return;
+                }
+
+                ApplyOverride(downscaled);
+            }
+            finally
             {
-                ClearOverride();
-                return;
+                if (stale != null)
+                {
+                    foreach (var texture in stale)
+                    {
+                        if (texture != null)
+                        {
+                            DestroyImmediate(texture);
+                        }
+                    }
+                }
             }
+        }
 
-            ApplyOverride(downscaled);
+        /// <summary>
+        /// The texture the renderer actually samples. With Sprite Atlas enabled in the editor
+        /// sprite.texture is still the source PNG while the mesh UVs point into the atlas, so
+        /// overriding _MainTex with a source-sized copy would scramble the sprite.
+        /// </summary>
+        private static Texture2D GetRenderedTexture(Sprite sprite)
+        {
+            // getAtlasData: true throws for sprites that aren't in an atlas.
+            return sprite.packed
+                ? UnityEditor.Sprites.SpriteUtility.GetSpriteTexture(sprite, true)
+                : sprite.texture;
         }
 
         private void ApplyOverride(Texture2D texture)
         {
             _block ??= new MaterialPropertyBlock();
             _renderer.GetPropertyBlock(_block);
+
+            bool changed = !_overrideActive || _block.GetTexture(MainTexId) != texture;
+
+            if (changed)
+            {
+                // Round-tripping the block (Get -> Set) keeps a reference to the previous preview
+                // texture somewhere inside SpriteRenderer (Unity 6): update/Layout see the new
+                // _MainTex, but the Repaint pass samples the old, already destroyed one -> grey
+                // sprite. Dropping the block first and starting from a clean one avoids that.
+                _renderer.SetPropertyBlock(null);
+                _renderer.GetPropertyBlock(_block);
+            }
+
             _block.SetTexture(MainTexId, texture);
             _renderer.SetPropertyBlock(_block);
             _overrideActive = true;
+
+            if (changed)
+            {
+                // A property block change doesn't repaint the Scene view by itself.
+                UnityEditor.SceneView.RepaintAll();
+            }
         }
 
         private void ClearOverride()
@@ -163,12 +211,10 @@ namespace _Brsk420.Runtime
                 return;
             }
 
-            // Remove just our _MainTex override; keep any other property-block data intact.
-            _block ??= new MaterialPropertyBlock();
-            _renderer.GetPropertyBlock(_block);
-            _block.Clear();
-            _renderer.SetPropertyBlock(_block);
+            // MaterialPropertyBlock can't drop a single property, so this clears the whole block.
+            _renderer.SetPropertyBlock(null);
             _overrideActive = false;
+            UnityEditor.SceneView.RepaintAll();
         }
 
         private Texture2D GetOrBuildPreviewTexture(Texture2D source, int quality)
@@ -189,6 +235,98 @@ namespace _Brsk420.Runtime
 
         private Texture2D BuildTexture(Texture2D source, int quality)
         {
+            return BuildTextureFromFile(source, quality) ?? BuildTextureOnGpu(source, quality);
+        }
+
+        /// <summary>
+        /// Reads the source PNG from disk (exactly what DownscaleTool reads) and resamples it
+        /// on the CPU. Blit+ReadPixels from EditorApplication.update came back grey, so the GPU
+        /// path is only a fallback for textures without a PNG behind them (atlas pages).
+        /// </summary>
+        private static Texture2D BuildTextureFromFile(Texture2D source, int quality)
+        {
+            var path = UnityEditor.AssetDatabase.GetAssetPath(source);
+            if (string.IsNullOrEmpty(path) || !path.EndsWith(".png", System.StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+
+            var decoded = new Texture2D(2, 2, TextureFormat.RGBA32, false, false);
+            Color32[] srcPixels;
+            int srcWidth;
+            int srcHeight;
+
+            try
+            {
+                if (!PngLoader.TryLoad(decoded, System.IO.File.ReadAllBytes(path), path))
+                {
+                    return null;
+                }
+
+                srcPixels = decoded.GetPixels32();
+                srcWidth = decoded.width;
+                srcHeight = decoded.height;
+            }
+            finally
+            {
+                DestroyImmediate(decoded);
+            }
+
+            // Same math as DownscaleTool.Downscale(path, multiplier).
+            int downWidth = Mathf.Max(1, srcWidth * quality / 100);
+            int downHeight = Mathf.Max(1, srcHeight * quality / 100);
+
+            var downPixels = ResampleBilinear(srcPixels, srcWidth, srcHeight, downWidth, downHeight);
+            var upPixels = ResampleBilinear(downPixels, downWidth, downHeight, srcWidth, srcHeight);
+
+            // Sprite UVs are normalized, so a PNG-sized texture fits even if the importer
+            // shrank the texture (Max Size).
+            var previewTexture = new Texture2D(srcWidth, srcHeight, TextureFormat.RGBA32, false, false)
+            {
+                name = $"{source.name}_DownscalePreview_{quality}",
+                hideFlags = HideFlags.HideAndDontSave,
+                filterMode = source.filterMode,
+                wrapMode = source.wrapMode
+            };
+            previewTexture.SetPixels32(upPixels);
+            previewTexture.Apply();
+
+            return previewTexture;
+        }
+
+        /// <summary>
+        /// One bilinear tap per destination pixel centre, clamped at the edges — the same
+        /// sampling a single Graphics.Blit into a smaller/larger target does.
+        /// </summary>
+        private static Color32[] ResampleBilinear(Color32[] src, int srcWidth, int srcHeight, int dstWidth, int dstHeight)
+        {
+            var dst = new Color32[dstWidth * dstHeight];
+
+            for (int y = 0; y < dstHeight; y++)
+            {
+                float sy = Mathf.Clamp((y + 0.5f) * srcHeight / dstHeight - 0.5f, 0f, srcHeight - 1);
+                int y0 = (int)sy;
+                int y1 = Mathf.Min(y0 + 1, srcHeight - 1);
+                float ty = sy - y0;
+
+                for (int x = 0; x < dstWidth; x++)
+                {
+                    float sx = Mathf.Clamp((x + 0.5f) * srcWidth / dstWidth - 0.5f, 0f, srcWidth - 1);
+                    int x0 = (int)sx;
+                    int x1 = Mathf.Min(x0 + 1, srcWidth - 1);
+                    float tx = sx - x0;
+
+                    var top = Color32.Lerp(src[y0 * srcWidth + x0], src[y0 * srcWidth + x1], tx);
+                    var bottom = Color32.Lerp(src[y1 * srcWidth + x0], src[y1 * srcWidth + x1], tx);
+                    dst[y * dstWidth + x] = Color32.Lerp(top, bottom, ty);
+                }
+            }
+
+            return dst;
+        }
+
+        private static Texture2D BuildTextureOnGpu(Texture2D source, int quality)
+        {
             int srcWidth = source.width;
             int srcHeight = source.height;
 
@@ -199,14 +337,18 @@ namespace _Brsk420.Runtime
             var previousActive = RenderTexture.active;
 
             // Step 1: downscale (loses detail, exactly like the real tool's Blit).
+            // Temporary RTs come from a pool with old contents, so clear them first: if the
+            // Blit gets clipped by leftover editor GL state, garbage must not leak through.
             var downRt = RenderTexture.GetTemporary(downWidth, downHeight, 0, RenderTextureFormat.ARGB32);
             downRt.filterMode = FilterMode.Bilinear;
+            ClearTarget(downRt);
             Graphics.Blit(source, downRt);
 
             // Step 2: upscale back to original size so on-screen size / UVs stay the same,
             // while the lost detail (the "шакал" effect) remains visible.
             var upRt = RenderTexture.GetTemporary(srcWidth, srcHeight, 0, RenderTextureFormat.ARGB32);
             upRt.filterMode = FilterMode.Bilinear;
+            ClearTarget(upRt);
             Graphics.Blit(downRt, upRt);
 
             RenderTexture.active = upRt;
@@ -226,6 +368,13 @@ namespace _Brsk420.Runtime
             RenderTexture.ReleaseTemporary(upRt);
 
             return previewTexture;
+        }
+
+        private static void ClearTarget(RenderTexture target)
+        {
+            RenderTexture.active = target;
+            GL.Viewport(new Rect(0, 0, target.width, target.height));
+            GL.Clear(true, true, Color.clear);
         }
 
         private void ClearCache()

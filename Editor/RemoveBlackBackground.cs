@@ -1,3 +1,4 @@
+using _Brsk420.Runtime;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -76,7 +77,11 @@ namespace _Brsk420.EditorTools
 
             try
             {
-                tex.LoadImage(bytes);
+                if (!PngLoader.TryLoad(tex, bytes, path))
+                {
+                    return;
+                }
+
 
                 var pixels = tex.GetPixels32();
                 bool changed = false;

@@ -1,4 +1,5 @@
-﻿using System;
+﻿using _Brsk420.Runtime;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using UnityEditor;
@@ -116,7 +117,10 @@ namespace _Brsk420.EditorTools
 
             try
             {
-                texture.LoadImage(bytes);
+                if (!PngLoader.TryLoad(texture, bytes, path))
+                {
+                    return;
+                }
 
                 int targetWidth = Mathf.Max(1, texture.width * multiplier / 100);
                 int targetHeight = Mathf.Max(1, texture.height * multiplier / 100);
