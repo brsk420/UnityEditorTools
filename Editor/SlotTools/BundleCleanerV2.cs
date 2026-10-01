@@ -4,9 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using UnityEditor;
-using UnityEditor.U2D;
 using UnityEngine;
-using UnityEngine.U2D;
 
 /// <summary>
 /// Finds assets inside a bundle folder that nothing can reach.
@@ -15,11 +13,14 @@ using UnityEngine.U2D;
 /// under it inherits the tag and ships inside the .unity3d whether or not anything references
 /// it. Unreferenced files are therefore paid for by the player, not just by the repository.
 ///
-/// Three verdicts:
-///   Keep    - reachable from a root asset, or its name appears in config/code
-///   Review  - unreachable, but sits inside a folder a SpriteAtlas packs wholesale.
-///             It bloats the atlas, but removing it changes the atlas: a human decides.
+/// Two verdicts:
+///   Keep    - reachable from a root asset, or its name appears in config/code (non-images only:
+///             images are never loaded by name)
 ///   Delete  - unreachable by every check we have
+///
+/// SpriteAtlases are not evidence of use. An atlas packs whatever folder it was pointed at, so
+/// it is neither a root nor an entry: it never keeps anything alive and is never itself deleted.
+/// After deleting, the atlas simply repacks without the removed sprites.
 ///
 /// Known blind spots, listed so nobody mistakes this for proof:
 ///   - paths assembled at runtime from fragments ("Symbols/" + name + "_big")
@@ -34,14 +35,23 @@ public static class SlotBundleCleanerV2
 
     // Anything the server may plausibly request by name is a root, so its dependencies survive.
     static readonly HashSet<string> RootExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-    { ".prefab", ".unity", ".asset", ".spriteatlas", ".controller", ".overridecontroller",
+    { ".prefab", ".unity", ".asset", ".controller", ".overridecontroller",
       ".json", ".txt", ".bytes", ".lua", ".playable", ".mixer" };
 
     // Files scanned to build the "referenced by name" index.
     static readonly HashSet<string> ConfigExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     { ".json", ".txt", ".bytes", ".lua", ".cs", ".xml", ".csv", ".yaml", ".yml" };
 
-    public enum Verdict { Keep, Review, Delete }
+    public enum Verdict { Keep, Delete }
+
+    // Skipped entirely: not a root, not a candidate for deletion.
+    static readonly HashSet<string> IgnoredExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    { ".spriteatlas", ".spriteatlasv2" };
+
+    // Images are never loaded by name in this project, only by reference, so a file name that
+    // happens to match a symbol ID in code ("ACE", "WILD") proves nothing about them.
+    static readonly HashSet<string> ImageExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    { ".png", ".jpg", ".jpeg", ".psd", ".tga", ".tif", ".tiff", ".gif", ".bmp", ".exr", ".hdr", ".webp" };
 
     public class Entry
     {
@@ -98,7 +108,6 @@ public static class SlotBundleCleanerV2
     public static List<Entry> Analyze(IReadOnlyList<string> bundleRoots)
     {
         var result = new List<Entry>();
-        var atlasFolders = AtlasPackedFolders();
         try
         {
             for (int i = 0; i < bundleRoots.Count; i++)
@@ -107,14 +116,14 @@ public static class SlotBundleCleanerV2
                 if (EditorUtility.DisplayCancelableProgressBar("Bundle Cleaner V2",
                         b, (float)i / Mathf.Max(1, bundleRoots.Count)))
                     break;
-                AnalyzeBundle(b, atlasFolders, result);
+                AnalyzeBundle(b, result);
             }
         }
         finally { EditorUtility.ClearProgressBar(); }
         return result;
     }
 
-    static void AnalyzeBundle(string bundleRoot, HashSet<string> atlasFolders, List<Entry> into)
+    static void AnalyzeBundle(string bundleRoot, List<Entry> into)
     {
         if (!AssetDatabase.IsValidFolder(bundleRoot)) return;
 
@@ -123,6 +132,7 @@ public static class SlotBundleCleanerV2
             .Distinct()
             .Where(p => !string.IsNullOrEmpty(p) && !AssetDatabase.IsValidFolder(p))   // never a folder
             .Where(p => p.StartsWith(bundleRoot + "/", StringComparison.Ordinal))
+            .Where(p => !IgnoredExtensions.Contains(Path.GetExtension(p)))
             .ToList();
         if (all.Count == 0) return;
 
@@ -143,15 +153,10 @@ public static class SlotBundleCleanerV2
                 e.Verdict = Verdict.Keep;
                 e.Reason = roots.Contains(p) ? "root asset" : "reachable from a root";
             }
-            else if (IsNamedInConfig(p))
+            else if (!ImageExtensions.Contains(Path.GetExtension(p)) && IsNamedInConfig(p))
             {
                 e.Verdict = Verdict.Keep;
                 e.Reason = "name appears in config/code";
-            }
-            else if (InAtlasPackedFolder(p, atlasFolders))
-            {
-                e.Verdict = Verdict.Review;
-                e.Reason = "packed into a SpriteAtlas via its folder, but nothing references it";
             }
             else
             {
@@ -245,34 +250,6 @@ public static class SlotBundleCleanerV2
     static bool IsNamedInConfig(string assetPath)
         => NameIndex.Contains(Path.GetFileNameWithoutExtension(assetPath));
 
-    // ---------------------------------------------------------------- sprite atlases
-
-    /// Folders listed for packing in any SpriteAtlas. Every image inside such a folder ends up in
-    /// the atlas even though its own GUID appears nowhere.
-    static HashSet<string> AtlasPackedFolders()
-    {
-        var folders = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var guid in AssetDatabase.FindAssets("t:SpriteAtlas"))
-        {
-            var atlas = AssetDatabase.LoadAssetAtPath<SpriteAtlas>(AssetDatabase.GUIDToAssetPath(guid));
-            if (atlas == null) continue;
-            foreach (var o in atlas.GetPackables())
-            {
-                if (o == null) continue;
-                var p = AssetDatabase.GetAssetPath(o);
-                if (!string.IsNullOrEmpty(p) && AssetDatabase.IsValidFolder(p)) folders.Add(p);
-            }
-        }
-        return folders;
-    }
-
-    static bool InAtlasPackedFolder(string assetPath, HashSet<string> atlasFolders)
-    {
-        foreach (var f in atlasFolders)
-            if (assetPath.StartsWith(f + "/", StringComparison.Ordinal)) return true;
-        return false;
-    }
-
     // ---------------------------------------------------------------- helpers
 
     public static IEnumerable<string> EnumerateBundles()
@@ -314,7 +291,7 @@ public static class SlotBundleCleanerV2
             return v + ": " + s.Count + " files, " + (s.Sum(x => x.Size) / 1048576.0).ToString("F1") + " MB";
         };
         return "Bundles: " + e.Select(x => x.Bundle).Distinct().Count() + "\n"
-             + line(Verdict.Keep) + "\n" + line(Verdict.Review) + "\n" + line(Verdict.Delete);
+             + line(Verdict.Keep) + "\n" + line(Verdict.Delete);
     }
 
     public static string WriteReport(List<Entry> entries)
@@ -371,8 +348,8 @@ public class BundleCleanerV2Window : EditorWindow
         if (_all == null) return;
 
         EditorGUILayout.HelpBox(SlotBundleCleanerV2.Summary(_all)
-            + "\n\nKeep   - reachable from a root asset, or named in config/code"
-            + "\nReview - unreachable, but a SpriteAtlas packs its folder wholesale"
+            + "\n\nKeep   - reachable from a root asset, or named in config/code (not for images)"
+            + "\nSpriteAtlases are ignored: they neither keep sprites alive nor get deleted"
             + "\nDelete - unreachable by every check"
             + "\n\nBlind spots: runtime-composed paths, compiled assemblies, Spine/Lua relative paths."
             + " Rebuild the bundles afterwards and compare sizes.", MessageType.Info);
@@ -415,7 +392,7 @@ public class BundleCleanerV2Window : EditorWindow
         if (GUILayout.Button("DELETE " + del + " assets marked Delete", GUILayout.Height(36)))
         {
             if (EditorUtility.DisplayDialog("Bundle Cleaner V2",
-                    "Delete " + del + " assets?\n\nOnly the Delete tab is touched. Review and Keep stay.\n"
+                    "Delete " + del + " assets?\n\nOnly the Delete tab is touched. Keep stays.\n"
                     + "Commit or stash first - this is not undoable from the editor.", "Delete", "Cancel"))
                 SlotBundleCleanerV2.Delete(_all);
         }

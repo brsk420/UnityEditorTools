@@ -141,6 +141,20 @@ public class SpriteAtlasViewer : EditorWindow
         int expectedSprites = packed?.Length ?? 0;
         Debug.Log($"[AV] pages={pages.Length}  page[0].name={pages[0]?.name}  packed={expectedSprites}");
 
+        // Approach 0: read the layout straight from Library/AtlasCache. Needs no sprite binding,
+        // which Unity 6 never does in the editor under "Sprite Atlas V1 - Enabled For Builds",
+        // so A/B/C below all come back empty there.
+        int fromCache = TryPopulateFromAtlasCache(packed, pages, originals);
+        Debug.Log($"[AV] 0: from AtlasCache={fromCache}/{expectedSprites}");
+        if (expectedSprites > 0 && fromCache >= expectedSprites * 0.9f)
+        {
+            s_PageDataCache[atlasGuid] = _pageData;
+            titleContent = new GUIContent(
+                $"Atlas: {atlas.name}  ({atlas.spriteCount} sprites / {_pages.Length} page{(_pages.Length > 1 ? "s" : "")})");
+            return;
+        }
+        foreach (var pd in _pageData) pd.Sprites.Clear();
+
         // Approach A: sprite.texture directly matches a loaded page (Mac/DXT5 projects)
         if (packed != null)
             PopulateFromPacked(packed, instToPage, nameToPage, originals, useSpriteTexRect: true);
@@ -264,6 +278,95 @@ public class SpriteAtlasViewer : EditorWindow
         try { return m?.Invoke(null, new object[] { atlas }) as Sprite[]; }
         catch (TargetInvocationException) { return null; } // atlas has no packed data yet
         catch (System.ArgumentException) { return null; }
+    }
+
+    // Approach 0. Every packed page is named "sactx-<page>-<size>-<format>-<atlas>-<hash8>", and
+    // Library/AtlasCache/<hash[0..2]>/<hash...> is the CachedSpriteAtlasRuntimeData those pages
+    // came from. Its "frames" map (sprite GUID, fileID) → page texture + textureRect in page pixels.
+    private int TryPopulateFromAtlasCache(Sprite[] packed, Texture2D[] pages, Dictionary<string, Sprite> originals)
+    {
+        if (packed == null || pages == null || pages.Length == 0) return 0;
+
+        string pageName = pages[0]?.name ?? "";
+        int dash = pageName.LastIndexOf('-');
+        if (dash < 0 || pageName.Length - dash - 1 < 8) return 0;
+        string hash = pageName.Substring(dash + 1).ToLowerInvariant();
+
+        string dir = System.IO.Path.Combine("Library", "AtlasCache", hash.Substring(0, 2));
+        if (!System.IO.Directory.Exists(dir)) return 0;
+        string file = System.IO.Directory.GetFiles(dir, hash + "*").FirstOrDefault();
+        if (file == null) return 0;
+
+        // (guid, fileID) → sprite, for the sprites this atlas packs
+        var byKey = new Dictionary<string, Sprite>();
+        foreach (var s in packed)
+            if (s != null && AssetDatabase.TryGetGUIDAndLocalFileIdentifier(s, out string g, out long id))
+                byKey[g + ":" + id] = s;
+
+        // atlas page index ("sactx-N-") → index into pages
+        var pageIdx = new Dictionary<int, int>();
+        for (int i = 0; i < pages.Length; i++)
+        {
+            int n = ParseSactxIndex(pages[i]?.name);
+            if (n >= 0 && !pageIdx.ContainsKey(n)) pageIdx[n] = i;
+        }
+
+        Object[] objs = null;
+        int found = 0;
+        try
+        {
+            objs = UnityEditorInternal.InternalEditorUtility.LoadSerializedFileAndForget(file);
+            if (objs == null || objs.Length == 0 || objs[0] == null) return 0;
+
+            var frames = new SerializedObject(objs[0]).FindProperty("frames");
+            if (frames == null || !frames.isArray) return 0;
+
+            for (int i = 0; i < frames.arraySize; i++)
+            {
+                var f   = frames.GetArrayElementAtIndex(i);
+                var key = f.FindPropertyRelative("first.first");
+                var fid = f.FindPropertyRelative("first.second");
+                var tex = f.FindPropertyRelative("second.texture");
+                var rc  = f.FindPropertyRelative("second.textureRect");
+                var raw = f.FindPropertyRelative("second.settingsRaw");
+                if (key == null || fid == null || tex == null || rc == null) continue;
+
+                // GUID is stored as 4 uint32; the hex string is each word's 8 nibbles reversed
+                var sb = new System.Text.StringBuilder(32);
+                for (int w = 0; w < 4; w++)
+                {
+                    var p = key.FindPropertyRelative("data[" + w + "]");
+                    if (p == null) { sb = null; break; }
+                    string h = ((uint)p.longValue).ToString("x8");
+                    for (int c = 7; c >= 0; c--) sb.Append(h[c]);
+                }
+                if (sb == null) continue;
+                if (!byKey.TryGetValue(sb + ":" + fid.longValue, out Sprite ps)) continue;
+
+                var pageTex = tex.objectReferenceValue as Texture2D;
+                if (pageTex == null || !pageIdx.TryGetValue(ParseSactxIndex(pageTex.name), out int pi)) continue;
+
+                Rect r = rc.rectValue;
+                // SpritePackingRotation lives in bits 2-5 of settingsRaw; Rotate90 (4) swaps the footprint
+                if (raw != null && ((raw.longValue >> 2) & 0xF) == 4)
+                    r = new Rect(r.x, r.y, r.height, r.width);
+
+                _pageData[pi].Sprites.Add(MakeEntry(ps, r, originals));
+                found++;
+            }
+        }
+        catch (System.Exception ex)
+        {
+            Debug.LogWarning($"[Atlas Viewer] could not read {file}: {ex.Message}");
+        }
+        finally
+        {
+            // LoadSerializedFileAndForget hands back untracked copies; free them (the page textures too)
+            if (objs != null)
+                foreach (var o in objs)
+                    if (o != null) Object.DestroyImmediate(o, true);
+        }
+        return found;
     }
 
     // Approach C: GetSpriteTexture(sprite,true) returns the real atlas page.
